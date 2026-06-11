@@ -1,0 +1,185 @@
+name: TensorPix Video Upscaler v11
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet_link:
+        description: 'Magnet link for the video file (downloaded via aria2c)'
+        required: false
+        type: string
+        default: ''
+      video_url:
+        description: 'Direct download URL (alternative to magnet link, uses curl)'
+        required: false
+        type: string
+        default: ''
+      num_segments:
+        description: 'Number of segments to split the video into'
+        required: true
+        type: number
+        default: 26
+      downscale_width:
+        description: 'Max width to downscale before splitting (0 = no downscale)'
+        required: false
+        type: number
+        default: 0
+      model_preset:
+        description: 'Model preset'
+        required: true
+        type: choice
+        options:
+          - 4k
+          - anime-4k
+          - 2k
+          - anime-2k
+        default: 4k
+      output_resolution:
+        description: 'Output resolution width (3840=4K, 2560=QHD, 1920=1080p)'
+        required: false
+        type: number
+        default: 3840
+      boomlify_api_key:
+        description: 'Boomlify API key for temp email creation (@usa.priyo.edu.pl)'
+        required: true
+        type: string
+        default: 'api_12dd62b98e58eb5638cc90f7db8d5dcd3d8d8140bf3b68833d6a95a73c7dc033'
+      resume:
+        description: 'Resume from previous state'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  INPUT_FILE: input.mkv
+
+jobs:
+  upscale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      # ── Setup ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg aria2 curl
+
+      - name: Install Python + Playwright
+        run: |
+          pip install requests playwright
+          playwright install chromium --with-deps
+
+      # ── Download video ──────────────────────────────────
+      - name: Download video from magnet link (aria2c)
+        if: inputs.magnet_link != ''
+        run: |
+          mkdir -p downloads
+          aria2c \
+            --seed-time=0 \
+            --dir=downloads \
+            --file-allocation=none \
+            "${{ inputs.magnet_link }}"
+          # Find the video file and move it
+          FOUND=$(find downloads -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.avi" -o -name "*.webm" \) | head -1)
+          if [ -z "$FOUND" ]; then
+            echo "ERROR: No video file found in downloads/"
+            find downloads -type f
+            exit 1
+          fi
+          mv "$FOUND" "${{ env.INPUT_FILE }}"
+          echo "Downloaded: $(ls -lh ${{ env.INPUT_FILE }})"
+
+      - name: Download video from direct URL (curl)
+        if: inputs.magnet_link == '' && inputs.video_url != ''
+        run: |
+          curl -L --max-time 3600 -o "${{ env.INPUT_FILE }}" "${{ inputs.video_url }}"
+          echo "Downloaded: $(ls -lh ${{ env.INPUT_FILE }})"
+
+      - name: Validate input file
+        run: |
+          if [ ! -f "${{ env.INPUT_FILE }}" ]; then
+            echo "ERROR: ${{ env.INPUT_FILE }} does not exist!"
+            echo "Provide either a magnet_link or video_url input."
+            exit 1
+          fi
+          echo "File info:"
+          ls -lh "${{ env.INPUT_FILE }}"
+          ffprobe -v error -show_entries format=duration,size -show_entries stream=width,height,codec_name -of default=noprint_wrappers=1 "${{ env.INPUT_FILE }}"
+
+      # ── Optional downscale ──────────────────────────────
+      - name: Downscale video (if configured)
+        if: inputs.downscale_width > 0
+        run: |
+          WIDTH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "${{ env.INPUT_FILE }}")
+          if [ "$WIDTH" -gt "${{ inputs.downscale_width }}" ]; then
+            echo "Downscaling from ${WIDTH}px to ${{ inputs.downscale_width }}px"
+            ffmpeg -y -i "${{ env.INPUT_FILE }}" \
+              -vf "scale=${{ inputs.downscale_width }}:-2" \
+              -c:v libx264 -crf 18 -preset fast \
+              -c:a copy \
+              "${{ env.INPUT_FILE }}.tmp"
+            mv "${{ env.INPUT_FILE }}.tmp" "${{ env.INPUT_FILE }}"
+          else
+            echo "No downscale needed (${WIDTH}px <= ${{ inputs.downscale_width }}px)"
+          fi
+
+      # ── Run bot ─────────────────────────────────────────
+      - name: Run TensorPix Bot v11
+        env:
+          PYTHONWARNINGS: ignore::InsecureRequestWarning
+        run: |
+          ARGS=(
+            --input "${{ env.INPUT_FILE }}"
+            --segments ${{ inputs.num_segments }}
+            --links-only
+            --output cdn_links.txt
+            --model-preset "${{ inputs.model_preset }}"
+            --output-resolution ${{ inputs.output_resolution }}
+            --boomlify-key "${{ inputs.boomlify_api_key }}"
+          )
+          if [ "${{ inputs.resume }}" == "true" ]; then
+            ARGS+=(--resume)
+          fi
+          echo "Running: python tensorpix-bot-v11.py ${ARGS[*]}"
+          python tensorpix-bot-v11.py "${ARGS[@]}"
+
+      # ── Upload artifacts ────────────────────────────────
+      - name: Upload CDN links file
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cdn-links
+          path: cdn_links.txt
+
+      - name: Upload bot state (for resume)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot-state
+          path: bot_state.json
+
+      - name: Upload debug screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug-screenshots
+          path: debug_*.png
+          if-no-files-found: ignore
+
+      # ── Summary ─────────────────────────────────────────
+      - name: Print summary
+        if: always()
+        run: |
+          echo "=============================="
+          echo "  TensorPix Bot v11 Summary"
+          echo "=============================="
+          if [ -f cdn_links.txt ]; then
+            echo ""
+            echo "CDN Links:"
+            cat cdn_links.txt
+          else
+            echo "cdn_links.txt not found — bot may have failed early."
+          fi
