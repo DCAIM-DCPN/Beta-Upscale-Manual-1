@@ -1,4 +1,4 @@
-name: TensorPix Video Upscaler v11
+name: TensorPix Video Upscaler v12
 
 on:
   workflow_dispatch:
@@ -23,21 +23,21 @@ on:
         required: false
         type: number
         default: 0
-      model_preset:
-        description: 'Model preset'
-        required: true
-        type: choice
-        options:
-          - 4k
-          - anime-4k
-          - 2k
-          - anime-2k
-        default: 4k
-      output_resolution:
-        description: 'Output resolution width (3840=4K, 2560=QHD, 1920=1080p)'
+      model:
+        description: 'Enhancement model (default auto-selects 4x Upscale Ultra 4)'
         required: false
-        type: number
-        default: 3840
+        type: string
+        default: ''
+      resolution:
+        description: 'Target resolution (default auto-selects 2160p)'
+        required: false
+        type: string
+        default: '2160p'
+      download_enhanced:
+        description: 'Also download enhanced videos and upload as artifact'
+        required: false
+        type: boolean
+        default: false
       boomlify_api_key:
         description: 'Boomlify API key for temp email creation (@usa.priyo.edu.pl)'
         required: true
@@ -69,7 +69,7 @@ jobs:
 
       - name: Install Python + Playwright
         run: |
-          pip install requests playwright
+          pip install playwright
           playwright install chromium --with-deps
 
       # ── Download video ──────────────────────────────────
@@ -127,24 +127,38 @@ jobs:
           fi
 
       # ── Run bot ─────────────────────────────────────────
-      - name: Run TensorPix Bot v11
-        env:
-          PYTHONWARNINGS: ignore::InsecureRequestWarning
+      - name: Run TensorPix Bot v12
         run: |
           ARGS=(
             --input "${{ env.INPUT_FILE }}"
             --segments ${{ inputs.num_segments }}
             --links-only
             --output cdn_links.txt
-            --model-preset "${{ inputs.model_preset }}"
-            --output-resolution ${{ inputs.output_resolution }}
             --boomlify-key "${{ inputs.boomlify_api_key }}"
           )
+
+          # Optional model
+          if [ -n "${{ inputs.model }}" ]; then
+            ARGS+=(--model "${{ inputs.model }}")
+          fi
+
+          # Resolution
+          if [ -n "${{ inputs.resolution }}" ]; then
+            ARGS+=(--resolution "${{ inputs.resolution }}")
+          fi
+
+          # Download enhanced videos
+          if [ "${{ inputs.download_enhanced }}" == "true" ]; then
+            ARGS+=(--download-enhanced)
+          fi
+
+          # Resume
           if [ "${{ inputs.resume }}" == "true" ]; then
             ARGS+=(--resume)
           fi
-          echo "Running: python tensorpix-bot-v11.py ${ARGS[*]}"
-          python tensorpix-bot-v11.py "${ARGS[@]}"
+
+          echo "Running: python tensorpix-bot-v12.py ${ARGS[*]}"
+          python tensorpix-bot-v12.py "${ARGS[@]}"
 
       # ── Upload artifacts ────────────────────────────────
       - name: Upload CDN links file
@@ -161,6 +175,22 @@ jobs:
           name: bot-state
           path: bot_state.json
 
+      - name: Upload enhanced videos
+        uses: actions/upload-artifact@v4
+        if: inputs.download_enhanced == true
+        with:
+          name: enhanced-videos
+          path: enhanced/
+          if-no-files-found: ignore
+
+      - name: Upload merged output
+        uses: actions/upload-artifact@v4
+        if: inputs.download_enhanced == true
+        with:
+          name: merged-output
+          path: enhanced_output.mp4
+          if-no-files-found: ignore
+
       - name: Upload debug screenshots
         uses: actions/upload-artifact@v4
         if: always()
@@ -174,7 +204,7 @@ jobs:
         if: always()
         run: |
           echo "=============================="
-          echo "  TensorPix Bot v11 Summary"
+          echo "  TensorPix Bot v12 Summary"
           echo "=============================="
           if [ -f cdn_links.txt ]; then
             echo ""
